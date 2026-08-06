@@ -79,6 +79,10 @@ LOG_SKIPS = os.environ.get("EBOSHI_LOG_SKIPS", "1") != "0"   # 是否記錄窗�
 # launchd 的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,homebrew 的 gh 不在其中。
 # 必須用絕對路徑,否則紀錄會靜默失效。
 GH_BIN = os.environ.get("GH_BIN", "/opt/homebrew/bin/gh")
+
+# 通知時附加的日曆截圖(需要瀏覽器,只在真的要通知時才跑;例行檢查完全不碰)。
+# 設為空字串即可停用,監控本身不受影響。
+SNAPSHOT_REPO = os.environ.get("EBOSHI_SNAPSHOT_REPO", "")
 # ==================
 
 
@@ -96,19 +100,32 @@ def in_booking_window(now_jst=None):
     return True, stamp
 
 
-def push_line(text):
+def _push(messages):
     if not LINE_CHANNEL_TOKEN or not LINE_GROUP_ID:
         print("⚠️ 未設定 LINE_CHANNEL_TOKEN / LINE_GROUP_ID,略過推播。內容:")
-        print(text)
+        for m in messages:
+            print("   ", m.get("text") or m.get("originalContentUrl"))
         return
     r = requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"},
-        json={"to": LINE_GROUP_ID, "messages": [{"type": "text", "text": text}]},
+        json={"to": LINE_GROUP_ID, "messages": messages},
         timeout=20,
     )
     r.raise_for_status()
+
+
+def push_line(text):
+    _push([{"type": "text", "text": text}])
+
+
+def push_line_image(url):
+    """
+    LINE 的圖片訊息不接受二進位上傳,只能給兩個公開可存取的 HTTPS 網址。
+    API 回 200 只代表請求被收下 —— LINE 是非同步去抓圖的,抓不到不會回報錯誤。
+    """
+    _push([{"type": "image", "originalContentUrl": url, "previewImageUrl": url}])
 
 
 def _gh(method, **kw):
@@ -288,14 +305,30 @@ def _run():
         f"電話預約:{PHONE}\n"
         f"日曆:{CALENDAR_URL}"
     )
+    # 文字先送、無條件送。截圖是加分項,絕不能因為它失敗而讓通知漏掉。
     try:
         push_line(text)
     except Exception as e:
         print(f"❌ 推播失敗:{e}", file=sys.stderr)
         return f"CHECK  {stamp}=FREE  PUSH-FAILED: {e}", 1
     set_notified(True)
-    print("✅ 已送出通知。")
-    return f"CHECK  {stamp}=FREE  ★NOTIFIED★", 0
+    print("✅ 已送出文字通知。")
+
+    shot_note = ""
+    if SNAPSHOT_REPO:
+        try:
+            import snapshot
+            path = snapshot.capture(TARGET_YEAR, TARGET_MONTH, TARGET_DAY)
+            url = snapshot.upload(path, SNAPSHOT_REPO, GH_BIN)
+            push_line_image(url)
+            print(f"✅ 已附上截圖:{url}")
+            shot_note = "  +snapshot"
+        except Exception as e:
+            print(f"⚠️ 截圖附加失敗(文字通知已送達):{type(e).__name__}: {e}",
+                  file=sys.stderr)
+            shot_note = f"  snapshot-failed:{type(e).__name__}"
+
+    return f"CHECK  {stamp}=FREE  ★NOTIFIED★{shot_note}", 0
 
 
 def main():
