@@ -28,6 +28,7 @@
 import base64
 import datetime
 import os
+import subprocess
 import sys
 
 import requests
@@ -68,6 +69,13 @@ STATE_REPO = (os.environ.get("EBOSHI_STATE_REPO")
               or os.environ.get("EBOSHI_SNAPSHOT_REPO") or "")
 STATE_PATH = os.environ.get("EBOSHI_STATE_PATH", "state/notified.flag")
 USE_REMOTE_STATE = bool(STATE_TOKEN and STATE_REPO)
+
+# 每次執行的紀錄。與上面的「狀態」刻意分開:
+# 狀態需要明確的 EBOSHI_GH_TOKEN 才啟用(行為改變,不該意外開啟);
+# 紀錄則是純附加、失敗無害,所以本機可退而使用 gh CLI 既有的認證,
+# 不必把任何憑證寫進設定檔。
+LOG_REPO = os.environ.get("EBOSHI_LOG_REPO") or STATE_REPO
+LOG_SKIPS = os.environ.get("EBOSHI_LOG_SKIPS", "1") != "0"   # 是否記錄窗口外的略過
 # ==================
 
 
@@ -120,6 +128,65 @@ def _remote_state():
     return base64.b64decode(body["content"]).decode().strip(), body["sha"]
 
 
+def _log_token():
+    """紀錄用的 token:優先環境變數,否則借用本機 gh CLI 的認證。"""
+    if STATE_TOKEN:
+        return STATE_TOKEN
+    try:
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                           text=True, timeout=10)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def append_run_log(line):
+    """
+    把一行執行紀錄附加到 repo 的 logs/YYYY-MM.log。
+
+    純附加、盡力而為:任何失敗只印警告,絕不影響監控結果。
+    呼叫點刻意放在推播之後,確保紀錄壞掉不會擋住通知。
+    按月分檔,避免單一檔案無限成長(每次更新都要整檔重傳)。
+    """
+    if not LOG_REPO:
+        return
+    token = _log_token()
+    if not token:
+        return
+
+    now = datetime.datetime.now(JST)
+    path = f"logs/{now:%Y-%m}.log"
+    url = f"https://api.github.com/repos/{LOG_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}",
+               "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+
+    for attempt in (1, 2):          # sha 衝突時重試一次
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            if r.status_code == 404:
+                existing, sha = "", None
+            else:
+                r.raise_for_status()
+                body = r.json()
+                existing = base64.b64decode(body["content"]).decode()
+                sha = body["sha"]
+
+            content = (existing.rstrip("\n") + "\n" + line).lstrip("\n") + "\n"
+            payload = {"message": f"log: {line[:60]}",
+                       "content": base64.b64encode(content.encode()).decode()}
+            if sha:
+                payload["sha"] = sha
+            p = requests.put(url, headers=headers, json=payload, timeout=20)
+            if p.status_code == 409 and attempt == 1:
+                continue            # 併發寫入,重讀 sha 再試
+            p.raise_for_status()
+            return
+        except Exception as e:
+            if attempt == 2:
+                print(f"⚠️ 寫入執行紀錄失敗(不影響監控):{e}", file=sys.stderr)
+
+
 def already_notified():
     if USE_REMOTE_STATE:
         try:
@@ -159,39 +226,43 @@ def set_notified(v):
         print(f"⚠️ 無法寫入狀態檔 {STATE_FILE}: {e}", file=sys.stderr)
 
 
-def main():
+def _run():
+    """執行一次檢查。回傳 (log 用的結果字串, 結束碼)。"""
     run_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    stamp = f"{TARGET_YEAR}/{TARGET_MONTH}/{TARGET_DAY}"
+    stamp = f"{TARGET_MONTH}/{TARGET_DAY}"
 
     # 窗口外直接離開,連網路都不碰。這是「檢查窗口」的權威判斷,
     # 不依賴 launchd 的排程時間 —— 那個會跟著機器時區跑。
     inside, when = in_booking_window()
     if not inside:
         print(f"[{run_at}] 略過({when},預約時段外)")
-        return
+        # when 形如「2026-08-07 00:05 JST Fri 早於 09:30」,取原因即可,
+        # 日期與星期已由 log 行首的時間戳表達。
+        parts = when.split(" ", 4)
+        return f"SKIP   {parts[4] if len(parts) > 4 else when}", 0
 
     try:
         days = fetch_month(TARGET_YEAR, TARGET_MONTH)
     except CalendarProtocolError as e:
         # 協定看不懂時中止,絕不預設成「可預約」而發出假警報
         print(f"[{run_at}] ❌ 日曆協定解析失敗,中止:{e}", file=sys.stderr)
-        sys.exit(1)
+        return f"ERROR  protocol: {e}", 1
     except requests.RequestException as e:
         print(f"[{run_at}] ❌ 連線失敗:{e}", file=sys.stderr)
-        sys.exit(1)
+        return f"ERROR  network: {type(e).__name__}", 1
 
     target = days[TARGET_DAY]
     desc = target["status"] or target["color"] or "空白"
 
     if not target["free"]:
         set_notified(False)   # 又滿了,重設以便下次變白再通知
-        print(f"[{run_at}] {stamp} = {desc} → 尚無空位。")
-        return
+        print(f"[{run_at}] {TARGET_YEAR}/{stamp} = {desc} → 尚無空位。")
+        return f"CHECK  {stamp}={desc}  no-action", 0
 
-    print(f"[{run_at}] 🎉 {stamp} → 可預約(來源:{target['source']})")
+    print(f"[{run_at}] 🎉 {TARGET_YEAR}/{stamp} → 可預約(來源:{target['source']})")
     if already_notified():
         print("   先前已通知過,略過推播。")
-        return
+        return f"CHECK  {stamp}=FREE  already-notified", 0
 
     text = (
         f"🏔 烏帽子小屋 {TARGET_MONTH}/{TARGET_DAY} 出現空位了!\n"
@@ -201,9 +272,32 @@ def main():
         f"電話預約:{PHONE}\n"
         f"日曆:{CALENDAR_URL}"
     )
-    push_line(text)
+    try:
+        push_line(text)
+    except Exception as e:
+        print(f"❌ 推播失敗:{e}", file=sys.stderr)
+        return f"CHECK  {stamp}=FREE  PUSH-FAILED: {e}", 1
     set_notified(True)
     print("✅ 已送出通知。")
+    return f"CHECK  {stamp}=FREE  ★NOTIFIED★", 0
+
+
+def main():
+    outcome, code = _run()
+
+    # 紀錄放在最後、包在 try 裡:寫 log 是網路操作會失敗,
+    # 而監控是主線 —— 旁支斷了主線要照走。
+    if outcome.startswith("SKIP") and not LOG_SKIPS:
+        pass
+    else:
+        try:
+            now = datetime.datetime.now(JST)
+            append_run_log(f"{now:%Y-%m-%d %H:%M} JST {now:%a}  {outcome}")
+        except Exception as e:
+            print(f"⚠️ 寫入執行紀錄失敗(不影響監控):{e}", file=sys.stderr)
+
+    if code:
+        sys.exit(code)
 
 
 if __name__ == "__main__":
