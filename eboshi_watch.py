@@ -25,8 +25,8 @@
 把目標設在營業期外時,「無狀態 = 可預約」的前提不成立。
 """
 
+import base64
 import datetime
-import json
 import os
 import sys
 
@@ -59,6 +59,15 @@ STATE_FILE = os.environ.get(
 )
 LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "")
 LINE_GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
+
+# 「已通知」旗標的儲存位置。雲端沙箱每次都是全新的,本機檔案存不下來,
+# 沒有持久狀態就會每小時重複通知。設了 token + repo 就改存 GitHub。
+# 未設則沿用本機檔案 —— 本機 launchd 的行為完全不變。
+STATE_TOKEN = os.environ.get("EBOSHI_GH_TOKEN", "")
+STATE_REPO = (os.environ.get("EBOSHI_STATE_REPO")
+              or os.environ.get("EBOSHI_SNAPSHOT_REPO") or "")
+STATE_PATH = os.environ.get("EBOSHI_STATE_PATH", "state/notified.flag")
+USE_REMOTE_STATE = bool(STATE_TOKEN and STATE_REPO)
 # ==================
 
 
@@ -91,7 +100,37 @@ def push_line(text):
     r.raise_for_status()
 
 
+def _gh(method, **kw):
+    url = f"https://api.github.com/repos/{STATE_REPO}/contents/{STATE_PATH}"
+    return requests.request(
+        method, url,
+        headers={"Authorization": f"Bearer {STATE_TOKEN}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        timeout=20, **kw)
+
+
+def _remote_state():
+    """回傳 (旗標內容 or None, sha or None)。404 = 檔案還不存在。"""
+    r = _gh("GET")
+    if r.status_code == 404:
+        return None, None
+    r.raise_for_status()
+    body = r.json()
+    return base64.b64decode(body["content"]).decode().strip(), body["sha"]
+
+
 def already_notified():
+    if USE_REMOTE_STATE:
+        try:
+            content, _ = _remote_state()
+            return content == "1"
+        except Exception as e:
+            # 讀不到狀態時偏向「尚未通知」—— 寧可多送一則,也不要因為狀態服務
+            # 出問題而讓真正的空位通知消失。但要留下明顯的痕跡。
+            print(f"⚠️ 讀取遠端狀態失敗,視為尚未通知(可能重複推播):{e}",
+                  file=sys.stderr)
+            return False
     try:
         with open(STATE_FILE) as f:
             return f.read().strip() == "1"
@@ -100,11 +139,23 @@ def already_notified():
 
 
 def set_notified(v):
+    value = "1" if v else "0"
+    if USE_REMOTE_STATE:
+        try:
+            _, sha = _remote_state()
+            payload = {"message": f"state: notified={value}",
+                       "content": base64.b64encode(value.encode()).decode()}
+            if sha:
+                payload["sha"] = sha
+            r = _gh("PUT", json=payload)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"⚠️ 寫入遠端狀態失敗,下次執行可能重複推播:{e}", file=sys.stderr)
+        return
     try:
         with open(STATE_FILE, "w") as f:
-            f.write("1" if v else "0")
+            f.write(value)
     except OSError as e:
-        # 雲端沙箱可能沒有可寫路徑;不讓它擋住通知本身
         print(f"⚠️ 無法寫入狀態檔 {STATE_FILE}: {e}", file=sys.stderr)
 
 
