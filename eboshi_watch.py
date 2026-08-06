@@ -42,6 +42,17 @@ TARGET_YEAR = 2026
 TARGET_MONTH = 9      # 1-based,直接用人類月份
 TARGET_DAY = 6
 
+# 只在日本電話預約時段內檢查。空位幾乎都來自電話取消,時段外偵測到也無法行動。
+# 起點提前 30 分鐘,讓開線那一刻就已經是最新狀態。
+#
+# 時區刻意寫死 JST 而不是依賴系統時區:launchd 的排程時間會跟著機器所在時區跑,
+# 出國時整個窗口會平移。用固定的 UTC+9 判斷,不管機器在台灣還是日本都對齊同一段時間。
+# JST 全年無日光節約時間,所以固定 offset 是安全的。
+JST = datetime.timezone(datetime.timedelta(hours=9))
+WINDOW_START = datetime.time(9, 30)    # 電話 10:00 開線,提前 30 分
+WINDOW_END = datetime.time(17, 0)      # 電話 17:00 收線
+WEEKDAYS_ONLY = True                   # 平日 = 週一~週五(未排除日本國定假日)
+
 STATE_FILE = os.environ.get(
     "EBOSHI_STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "eboshi_notified.flag"),
@@ -49,6 +60,20 @@ STATE_FILE = os.environ.get(
 LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "")
 LINE_GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 # ==================
+
+
+def in_booking_window(now_jst=None):
+    """回傳 (是否在窗口內, 說明字串)。時間一律以 JST 判斷。"""
+    now = now_jst or datetime.datetime.now(JST)
+    stamp = now.strftime("%Y-%m-%d %H:%M JST %a")
+    if WEEKDAYS_ONLY and now.weekday() >= 5:      # 5=六 6=日
+        return False, f"{stamp} 非平日"
+    t = now.time()
+    if t < WINDOW_START:
+        return False, f"{stamp} 早於 {WINDOW_START:%H:%M}"
+    if t > WINDOW_END:
+        return False, f"{stamp} 晚於 {WINDOW_END:%H:%M}"
+    return True, stamp
 
 
 def push_line(text):
@@ -86,6 +111,13 @@ def set_notified(v):
 def main():
     run_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     stamp = f"{TARGET_YEAR}/{TARGET_MONTH}/{TARGET_DAY}"
+
+    # 窗口外直接離開,連網路都不碰。這是「檢查窗口」的權威判斷,
+    # 不依賴 launchd 的排程時間 —— 那個會跟著機器時區跑。
+    inside, when = in_booking_window()
+    if not inside:
+        print(f"[{run_at}] 略過({when},預約時段外)")
+        return
 
     try:
         days = fetch_month(TARGET_YEAR, TARGET_MONTH)
