@@ -51,22 +51,6 @@ LINE_GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 # ==================
 
 
-def summarize(days):
-    """把可預約日壓成 '8, 10-29' 這種緊湊區間字串。"""
-    free = sorted(d for d, v in days.items() if v["free"])
-    if not free:
-        return "(無)"
-    parts, start, prev = [], free[0], free[0]
-    for d in free[1:] + [None]:
-        if d is not None and d == prev + 1:
-            prev = d
-            continue
-        parts.append(str(start) if start == prev else f"{start}-{prev}")
-        if d is not None:
-            start = prev = d
-    return ", ".join(parts)
-
-
 def push_line(text):
     if not LINE_CHANNEL_TOKEN or not LINE_GROUP_ID:
         print("⚠️ 未設定 LINE_CHANNEL_TOKEN / LINE_GROUP_ID,略過推播。內容:")
@@ -129,7 +113,7 @@ def main():
     text = (
         f"🏔 烏帽子小屋 {TARGET_MONTH}/{TARGET_DAY} 出現空位了!\n"
         f"\n"
-        f"{TARGET_MONTH}月可預約: {summarize(days)}\n"
+        f"該日目前狀態:可預約(日曆已變白)\n"
         f"\n"
         f"電話預約:{PHONE}\n"
         f"日曆:{CALENDAR_URL}"
