@@ -76,6 +76,9 @@ USE_REMOTE_STATE = bool(STATE_TOKEN and STATE_REPO)
 # 不必把任何憑證寫進設定檔。
 LOG_REPO = os.environ.get("EBOSHI_LOG_REPO") or STATE_REPO
 LOG_SKIPS = os.environ.get("EBOSHI_LOG_SKIPS", "1") != "0"   # 是否記錄窗口外的略過
+# launchd 的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,homebrew 的 gh 不在其中。
+# 必須用絕對路徑,否則紀錄會靜默失效。
+GH_BIN = os.environ.get("GH_BIN", "/opt/homebrew/bin/gh")
 # ==================
 
 
@@ -129,15 +132,28 @@ def _remote_state():
 
 
 def _log_token():
-    """紀錄用的 token:優先環境變數,否則借用本機 gh CLI 的認證。"""
+    """
+    紀錄用的 token:優先環境變數,否則借用本機 gh CLI 的認證。
+
+    GH_BIN 必須是絕對路徑:launchd 的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,
+    homebrew 裝的 gh 在 /opt/homebrew/bin 不在其中,用裸的 "gh" 會找不到。
+    """
     if STATE_TOKEN:
         return STATE_TOKEN
     try:
-        r = subprocess.run(["gh", "auth", "token"], capture_output=True,
+        r = subprocess.run([GH_BIN, "auth", "token"], capture_output=True,
                            text=True, timeout=10)
-        return r.stdout.strip() or None
-    except Exception:
-        return None
+        tok = r.stdout.strip()
+        if tok:
+            return tok
+        print(f"⚠️ {GH_BIN} auth token 沒有輸出,紀錄將被略過。"
+              f" stderr: {r.stderr.strip()[:120]}", file=sys.stderr)
+    except FileNotFoundError:
+        print(f"⚠️ 找不到 {GH_BIN},紀錄將被略過。"
+              f"(launchd 的 PATH 很精簡,GH_BIN 需為絕對路徑)", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️ 取得 gh token 失敗,紀錄將被略過:{e}", file=sys.stderr)
+    return None
 
 
 def append_run_log(line):
