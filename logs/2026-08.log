@@ -89,3 +89,4 @@ TEST-B-002618  (自動化測試)
 2026-08-10 16:00 JST Mon  CHECK  9/6=団体満員  no-action
 2026-08-10 16:30 JST Mon  CHECK  9/6=団体満員  no-action
 2026-08-10 17:00 JST Mon  SKIP   晚於 17:00
+2026-08-10 17:30 JST Mon  SKIP   晚於 17:00
