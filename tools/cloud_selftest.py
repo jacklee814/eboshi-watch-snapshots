@@ -11,6 +11,10 @@ Exit code is always 0; the verdict is in the output.
 import os
 import sys
 
+# The watcher modules live in the repo root, but running this as
+# `python3 tools/cloud_selftest.py` puts tools/ on sys.path -- not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 VERIFY_PATH = "state/cloud-verify.flag"   # scratch path, never the real flag
 
 
