@@ -71,3 +71,4 @@
 2026-10-19 11:13 JST Mon  CHECK  9/6=FREE  PUSH-FAILED: 400 Client Error: Bad Request for url: https://api.line.me/v2/bot/message/push
 2026-10-19 12:00 JST Mon  CHECK  9/6=FREE  PUSH-FAILED: 400 Client Error: Bad Request for url: https://api.line.me/v2/bot/message/push
 2026-10-19 12:30 JST Mon  CHECK  9/6=FREE  PUSH-FAILED: 400 Client Error: Bad Request for url: https://api.line.me/v2/bot/message/push
+2026-10-19 13:00 JST Mon  CHECK  9/6=FREE  PUSH-FAILED: 400 Client Error: Bad Request for url: https://api.line.me/v2/bot/message/push
